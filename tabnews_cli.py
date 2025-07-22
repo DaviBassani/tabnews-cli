@@ -9,20 +9,13 @@ from rich.prompt import Prompt
 from rich.table import Table
 from prompt_toolkit import Application
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout import Layout, HSplit, VSplit
-from prompt_toolkit.widgets import TextArea, Frame, Button
+from prompt_toolkit.layout import Layout, HSplit
+from prompt_toolkit.widgets import TextArea
 from prompt_toolkit.styles import Style
-from prompt_toolkit.layout.containers import Window, WindowAlign, ConditionalContainer
+from prompt_toolkit.layout.containers import Window
 from prompt_toolkit.layout.controls import FormattedTextControl
-from prompt_toolkit.layout.dimension import D
-from prompt_toolkit.formatted_text import HTML
-from prompt_toolkit.filters import Condition
 import asyncio
 from typing import List, Dict, Any
-import markdown2
-import re
-import textwrap
-import math
 
 console = Console()
 BASE_URL = "https://www.tabnews.com.br/api/v1"
@@ -84,7 +77,7 @@ class TabNewsUI:
         self.selected_index = 0
         self.contents = []
         self.current_content = None
-        self.view_mode = "feed"  
+        self.view_mode = "feed"
         self.content_scroll_position = 0
         self.comments = []
         self.terminal_width = 80
@@ -95,34 +88,32 @@ class TabNewsUI:
 
     def setup_ui(self):
         self.kb = KeyBindings()
-        
+
         @self.kb.add('up')
         def _(event):
             if self.view_mode == "feed":
                 self.selected_index = max(0, self.selected_index - 1)
-                self.update_feed()
             elif self.view_mode == "content":
-                self.current_content_page = max(0, self.current_content_page - 1)
-                self.update_content_view()
+                self.content_scroll_position = max(0, self.content_scroll_position - 1)
+            self.update_view()
             event.app.invalidate()
 
         @self.kb.add('down')
         def _(event):
             if self.view_mode == "feed":
                 self.selected_index = min(len(self.contents) - 1, self.selected_index + 1)
-                self.update_feed()
             elif self.view_mode == "content":
-                self.current_content_page = min(len(self.content_pages) - 1, self.current_content_page + 1)
-                self.update_content_view()
+                self.content_scroll_position += 1
+            self.update_view()
             event.app.invalidate()
 
         @self.kb.add('left')
         def _(event):
-            if self.view_mode == "feed":
-                if self.current_page > 1:
-                    self.current_page -= 1
-                    self.selected_index = 0
-                    self.update_feed()
+            if self.view_mode == "feed" and self.current_page > 1:
+                self.current_page -= 1
+                self.selected_index = 0
+                self.fetch_contents()
+            self.update_view()
             event.app.invalidate()
 
         @self.kb.add('right')
@@ -130,26 +121,31 @@ class TabNewsUI:
             if self.view_mode == "feed":
                 self.current_page += 1
                 self.selected_index = 0
-                self.update_feed()
+                self.fetch_contents()
+            self.update_view()
             event.app.invalidate()
 
         @self.kb.add('enter')
         def _(event):
             if self.view_mode == "feed" and self.contents:
-                content = self.contents[self.selected_index]
-                self.show_content(content)
-            elif self.view_mode == "content":
-                self.show_comments()
+                self.view_mode = "content"
+                self.content_scroll_position = 0
+                self.current_content = self.api.get_content(
+                    self.contents[self.selected_index]["owner_username"],
+                    self.contents[self.selected_index]["slug"]
+                )
+                self.comments = self.api.get_comments(
+                    self.contents[self.selected_index]["owner_username"],
+                    self.contents[self.selected_index]["slug"]
+                )
+            self.update_view()
             event.app.invalidate()
 
         @self.kb.add('escape')
         def _(event):
-            if self.view_mode == "content":
+            if self.view_mode in ["content", "comments"]:
                 self.view_mode = "feed"
-                self.update_feed()
-            elif self.view_mode == "comments":
-                self.view_mode = "content"
-                self.update_content_view()
+            self.update_view()
             event.app.invalidate()
 
         @self.kb.add('q')
@@ -159,77 +155,29 @@ class TabNewsUI:
         @self.kb.add('c')
         def _(event):
             if self.view_mode == "content":
-                self.show_comments()
+                self.view_mode = "comments"
+            self.update_view()
             event.app.invalidate()
 
-        self.feed_control = FormattedTextControl("")
-        self.content_control = FormattedTextControl("")
-        self.comments_control = FormattedTextControl("")
-        
-        
-        self.header_window = Window(
-            height=1,
-            content=FormattedTextControl("TabNews CLI - ↑↓: Navigate | ←→: Pages | Enter: Select | Esc: Back | C: Comments | Q: Quit"),
-            style="class:header"
-        )
-        
-        self.feed_window = Window(
-            content=self.feed_control,
-            style="class:feed"
-        )
-        
-        self.content_window = Window(
-            content=self.content_control,
-            style="class:content"
-        )
-        
-        self.comments_window = Window(
-            content=self.comments_control,
-            style="class:comments"
+        self.text_area = TextArea(
+            focusable=False,
+            style="class:text-area"
         )
 
-        
-        self.is_feed = Condition(lambda: self.view_mode == "feed")
-        self.is_content = Condition(lambda: self.view_mode == "content")
-        self.is_comments = Condition(lambda: self.view_mode == "comments")
-
-        
-        self.feed_container = ConditionalContainer(
-            self.feed_window,
-            filter=self.is_feed
-        )
-        
-        self.content_container = ConditionalContainer(
-            self.content_window,
-            filter=self.is_content
-        )
-        
-        self.comments_container = ConditionalContainer(
-            self.comments_window,
-            filter=self.is_comments
-        )
-        
         self.layout = Layout(
             HSplit([
-                self.header_window,
-                self.feed_container,
-                self.content_container,
-                self.comments_container
+                Window(
+                    height=1,
+                    content=FormattedTextControl("TabNews CLI - ↑↓: Navigate | ←→: Pages | Enter: Select | Esc: Back | C: Comments | Q: Quit"),
+                    style="class:header"
+                ),
+                self.text_area
             ])
         )
 
         self.style = Style.from_dict({
             'header': 'bg:ansiblue fg:white',
-            'feed': 'bg:ansiblack fg:white',
-            'content': 'bg:ansiblack fg:white',
-            'comments': 'bg:ansiblack fg:white',
-            'title': 'bold fg:ansiyellow',
-            'author': 'italic fg:ansigreen',
-            'date': 'fg:ansicyan',
-            'comment': 'fg:ansiyellow',
-            'page': 'bold fg:ansiyellow',
-            'separator': 'fg:ansiblue',
-            'page_number': 'fg:ansicyan'
+            'text-area': 'bg:ansiblack fg:white',
         })
 
         self.app = Application(
@@ -239,127 +187,41 @@ class TabNewsUI:
             full_screen=True
         )
 
-    def wrap_text(self, text, width=80):
-        return textwrap.fill(text, width=width)
-
-    def format_markdown(self, text):
-        html = markdown2.markdown(text)
-        return HTML(html)
-
-    def split_into_pages(self, text, width=80, height=20):
-        wrapped_text = self.wrap_text(text, width=width)
-        lines = wrapped_text.split('\n')
-        pages = []
-        current_page = []
-        current_height = 0
-
-        for line in lines:
-            if current_height >= height:
-                pages.append('\n'.join(current_page))
-                current_page = []
-                current_height = 0
-            current_page.append(line)
-            current_height += 1
-
-        if current_page:
-            pages.append('\n'.join(current_page))
-
-        return pages
-
-    def update_feed(self):
+    def fetch_contents(self):
         self.contents = self.api.get_contents(self.current_page, 10, self.current_strategy)
-        feed_text = []
-        
-        feed_text.append(f"[page]Page {self.current_page}[/page]")
-        feed_text.append("")
-        
+
+    def update_view(self):
+        with console.capture() as capture:
+            if self.view_mode == "feed":
+                self.display_feed(console)
+            elif self.view_mode == "content":
+                self.display_content(console)
+            elif self.view_mode == "comments":
+                self.display_comments(console)
+        self.text_area.text = capture.get()
+
+    def display_feed(self, console: Console):
+        table = Table(show_header=False, box=None, padding=(0, 1))
+        table.add_column()
         for i, content in enumerate(self.contents):
-            prefix = "→ " if i == self.selected_index else "  "
-            title = self.wrap_text(content['title'], width=self.terminal_width - 4)
-            author = content['owner_username']
-            feed_text.append(f"{prefix}{title}")
-            feed_text.append(f"    by {author}")
-            feed_text.append("")
-        
-        self.feed_control.text = "\n".join(feed_text)
-        self.content_control.text = ""
-        self.comments_control.text = ""
+            prefix = "→" if i == self.selected_index else " "
+            table.add_row(f"{prefix} {content['title']}")
+        console.print(table)
 
-    def show_content(self, content):
-        self.view_mode = "content"
-        self.current_content_page = 0
-        full_content = self.api.get_content(content["owner_username"], content["slug"])
-        self.current_content = full_content
-        self.prepare_content_pages()
-        self.update_content_view()
+    def display_content(self, console: Console):
+        if self.current_content:
+            markdown = Markdown(self.current_content["body"])
+            console.print(Panel(markdown, title=self.current_content["title"]))
 
-    def prepare_content_pages(self):
-        if not self.current_content:
-            return
-
-        content = self.current_content
-        title = self.wrap_text(content['title'], width=self.terminal_width - 4)
-        author = content['owner_username']
-        date = content['created_at']
-        
-        
-        body_pages = self.split_into_pages(
-            content['body'],
-            width=self.terminal_width - 4,
-            height=self.terminal_height - 6  
-        )
-        
-        self.content_pages = []
-        for i, page in enumerate(body_pages):
-            page_content = [
-                f"[title]{title}[/title]",
-                f"[author]by {author}[/author] | [date]{date}[/date]",
-                "",
-                "[separator]" + "─" * (self.terminal_width - 4) + "[/separator]",
-                "",
-                page,
-                "",
-                f"[page_number]Page {i + 1} of {len(body_pages)}[/page_number]"
-            ]
-            self.content_pages.append("\n".join(page_content))
-
-    def update_content_view(self):
-        if not self.content_pages:
-            return
-
-        self.content_control.text = self.content_pages[self.current_content_page]
-        self.comments_control.text = ""
-
-    def show_comments(self):
-        if not self.current_content:
-            return
-
-        self.view_mode = "comments"
-        comments = self.api.get_comments(
-            self.current_content["owner_username"],
-            self.current_content["slug"]
-        )
-        
-        comments_text = []
-        for comment in comments:
-            author = comment['owner_username']
-            date = comment['created_at']
-            body = self.wrap_text(comment['body'], width=self.terminal_width - 4)
-            
-            comments_text.extend([
-                f"[author]{author}[/author] | [date]{date}[/date]",
-                "",
-                body,
-                "",
-                "[separator]" + "─" * (self.terminal_width - 4) + "[/separator]",
-                ""
-            ])
-        
-        self.comments_control.text = "\n".join(comments_text)
-        self.content_control.text = ""
+    def display_comments(self, console: Console):
+        if self.comments:
+            for comment in self.comments:
+                markdown = Markdown(comment["body"])
+                console.print(Panel(markdown, title=comment["owner_username"]))
 
     def run(self):
-        self.update_feed()
+        self.fetch_contents()
+        self.update_view()
         self.app.run()
 
 if __name__ == "__main__":
