@@ -27,7 +27,8 @@ class RichControl(UIControl):
 
     def create_content(self, width: int, height: int) -> UIContent:
         renderable = self.get_renderable()
-        segments = list(console.render(renderable, console.options.update(size=(width, height))))
+        console = Console(width=width, height=height)
+        segments = list(console.render(renderable))
 
         def get_line(i: int) -> FormattedText:
             return [(s.style.class_names.pop() if s.style.class_names else "", s.text) for s in segments[i]]
