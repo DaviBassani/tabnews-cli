@@ -13,12 +13,30 @@ from prompt_toolkit.layout import Layout, HSplit
 from prompt_toolkit.widgets import TextArea
 from prompt_toolkit.styles import Style
 from prompt_toolkit.layout.containers import Window
-from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.controls import FormattedTextControl, UIContent, UIControl
+from prompt_toolkit.formatted_text import FormattedText
 import asyncio
 from typing import List, Dict, Any
 
 console = Console()
 BASE_URL = "https://www.tabnews.com.br/api/v1"
+
+class RichControl(UIControl):
+    def __init__(self, get_renderable):
+        self.get_renderable = get_renderable
+
+    def create_content(self, width: int, height: int) -> UIContent:
+        renderable = self.get_renderable()
+        segments = list(console.render(renderable, console.options.update(size=(width, height))))
+
+        def get_line(i: int) -> FormattedText:
+            return [(s.style.class_names.pop() if s.style.class_names else "", s.text) for s in segments[i]]
+
+        return UIContent(
+            get_line=get_line,
+            line_count=len(segments),
+            show_cursor=False,
+        )
 
 class TabNewsAPI:
     def __init__(self):
@@ -159,10 +177,7 @@ class TabNewsUI:
             self.update_view()
             event.app.invalidate()
 
-        self.text_area = TextArea(
-            focusable=False,
-            style="class:text-area"
-        )
+        self.rich_control = RichControl(self.get_renderable)
 
         self.layout = Layout(
             HSplit([
@@ -171,7 +186,7 @@ class TabNewsUI:
                     content=FormattedTextControl("TabNews CLI - ↑↓: Navigate | ←→: Pages | Enter: Select | Esc: Back | C: Comments | Q: Quit"),
                     style="class:header"
                 ),
-                self.text_area
+                Window(content=self.rich_control)
             ])
         )
 
@@ -190,38 +205,39 @@ class TabNewsUI:
     def fetch_contents(self):
         self.contents = self.api.get_contents(self.current_page, 10, self.current_strategy)
 
-    def update_view(self):
-        with console.capture() as capture:
-            if self.view_mode == "feed":
-                self.display_feed(console)
-            elif self.view_mode == "content":
-                self.display_content(console)
-            elif self.view_mode == "comments":
-                self.display_comments(console)
-        self.text_area.text = capture.get()
+    def get_renderable(self):
+        if self.view_mode == "feed":
+            return self.display_feed()
+        elif self.view_mode == "content":
+            return self.display_content()
+        elif self.view_mode == "comments":
+            return self.display_comments()
 
-    def display_feed(self, console: Console):
+    def display_feed(self):
         table = Table(show_header=False, box=None, padding=(0, 1))
         table.add_column()
         for i, content in enumerate(self.contents):
             prefix = "→" if i == self.selected_index else " "
             table.add_row(f"{prefix} {content['title']}")
-        console.print(table)
+        return table
 
-    def display_content(self, console: Console):
+    def display_content(self):
         if self.current_content:
             markdown = Markdown(self.current_content["body"])
-            console.print(Panel(markdown, title=self.current_content["title"]))
+            return Panel(markdown, title=self.current_content["title"])
+        return ""
 
-    def display_comments(self, console: Console):
+    def display_comments(self):
         if self.comments:
+            renderables = []
             for comment in self.comments:
                 markdown = Markdown(comment["body"])
-                console.print(Panel(markdown, title=comment["owner_username"]))
+                renderables.append(Panel(markdown, title=comment["owner_username"]))
+            return "\n".join(str(r) for r in renderables)
+        return ""
 
     def run(self):
         self.fetch_contents()
-        self.update_view()
         self.app.run()
 
 if __name__ == "__main__":
